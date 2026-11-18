@@ -41,12 +41,18 @@ initRunntime(
 );
 
 describe.skipIf(!present)('whisper small', () => {
-  it.for(['f32', 'f16'] as const)(
-    'matches transformers on every clip, %s',
+  // f32 matches every clip. f16 rounding may flip a near-tie token, and
+  // int8 weights (`runntime quantize --bits 8 --f16`) a few more.
+  it.for([
+    { name: 'f32', file: 'model.safetensors', dtype: 'f32', misses: 0 },
+    { name: 'f16', file: 'model.safetensors', dtype: 'f16', misses: 3 },
+    { name: 'int8', file: 'model.int8.safetensors', dtype: 'f16', misses: 6 },
+  ] as const)(
+    'matches transformers on every clip, $name',
     { timeout: 120_000 },
-    async (dtype) => {
+    async ({ name, file, dtype, misses }) => {
       const tokenizer = createWhisperTokenizer(await fetchJson(`${DIR}/tokenizer.json`));
-      const sd = await openWeights(`${DIR}/model.safetensors`);
+      const sd = await openWeights(`${DIR}/${file}`);
       const transcriber = await createWhisperTranscriber(sd, tokenizer, { weightDtype: dtype });
       try {
         let exact = 0;
@@ -56,13 +62,12 @@ describe.skipIf(!present)('whisper small', () => {
           const same = got.ids.filter((id) => id !== END_OF_TEXT).join() === ref.ids.join();
           if (same) exact++;
           console.log(
-            `${dtype} ${ref.id} ${same ? 'exact' : 'DIFF'} mel ${got.timings.melMs.toFixed(0)} ms, ` +
+            `${name} ${ref.id} ${same ? 'exact' : 'DIFF'} mel ${got.timings.melMs.toFixed(0)} ms, ` +
               `encode ${got.timings.encodeMs.toFixed(0)} ms, decode ${got.timings.decodeMs.toFixed(0)} ms ` +
               `/ ${got.timings.steps} steps\n  ours: ${got.text}\n  hf:   ${ref.text}`,
           );
         }
-        // f16 rounding may flip a near-tie token; f32 matches every clip.
-        expect(exact).toBeGreaterThanOrEqual(dtype === 'f32' ? refs.length : refs.length - 3);
+        expect(exact).toBeGreaterThanOrEqual(refs.length - misses);
       } finally {
         transcriber.dispose();
       }
