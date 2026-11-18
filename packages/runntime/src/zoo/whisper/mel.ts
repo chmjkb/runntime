@@ -55,88 +55,110 @@ export function melFilters(): Float64Array {
   return out;
 }
 
-/** Complex DFT of `n` points read from `src` at `offset` with `stride`,
- *  written contiguously to `dst` at `at`. Mixed-radix, decimation in time;
- *  `twiddle` holds e^(−2πij/HALF). */
-function fft(
-  n: number,
-  level: number,
+/** Twiddles of each FFT level, [k][q][r] → W_n^(r·(k + q·m)) as re, im
+ *  pairs, for the level's size n = m·p. */
+function levelTwiddles(): Float64Array[] {
+  const tables: Float64Array[] = [];
+  let n = HALF;
+  for (const p of FACTORS) {
+    const m = n / p;
+    const table = new Float64Array(2 * m * p * p);
+    for (let k = 0; k < m; k++) {
+      for (let q = 0; q < p; q++) {
+        for (let r = 0; r < p; r++) {
+          const angle = (-2 * Math.PI * ((r * (k + q * m)) % n)) / n;
+          const i = 2 * ((k * p + q) * p + r);
+          table[i] = Math.cos(angle);
+          table[i + 1] = Math.sin(angle);
+        }
+      }
+    }
+    tables.push(table);
+    n = m;
+  }
+  return tables;
+}
+
+/** Where each input point sits before the first butterfly stage: the
+ *  mixed-radix digit reversal of its index. */
+function digitReversal(): Int32Array {
+  const order = new Int32Array(HALF);
+  const place = (n: number, level: number, offset: number, stride: number, at: number) => {
+    if (n === 1) {
+      order[at] = offset;
+      return;
+    }
+    const p = FACTORS[level]!;
+    for (let r = 0; r < p; r++)
+      place(n / p, level + 1, offset + r * stride, stride * p, at + (r * n) / p);
+  };
+  place(HALF, 0, 0, 1, 0);
+  return order;
+}
+
+/** In-place butterflies over digit-reversed `re`/`im`, smallest blocks first:
+ *  each block of n = m·p points turns p DFTs of m into one of n, as
+ *  X[k + q·m] = Σ_r W_n^(r·(k + q·m)) · Y_r[k]. */
+function butterflies(
   re: Float64Array,
   im: Float64Array,
-  offset: number,
-  stride: number,
-  dstRe: Float64Array,
-  dstIm: Float64Array,
-  at: number,
-  twiddle: { re: Float64Array; im: Float64Array },
+  twiddles: readonly Float64Array[],
   scratch: Float64Array,
 ): void {
-  if (n === 1) {
-    dstRe[at] = re[offset]!;
-    dstIm[at] = im[offset]!;
-    return;
-  }
-  const p = FACTORS[level]!;
-  const m = n / p;
-  for (let r = 0; r < p; r++) {
-    fft(
-      m,
-      level + 1,
-      re,
-      im,
-      offset + r * stride,
-      stride * p,
-      dstRe,
-      dstIm,
-      at + r * m,
-      twiddle,
-      scratch,
-    );
-  }
-  // X[k + q·m] = Σ_r W_n^(r·(k + q·m)) · Y_r[k], with W_n = W_HALF^(HALF / n).
-  const step = HALF / n;
-  for (let k = 0; k < m; k++) {
-    for (let q = 0; q < p; q++) {
-      let sr = 0;
-      let si = 0;
-      for (let r = 0; r < p; r++) {
-        const e = ((r * (k + q * m)) % n) * step;
-        const wr = twiddle.re[e]!;
-        const wi = twiddle.im[e]!;
-        const yr = dstRe[at + r * m + k]!;
-        const yi = dstIm[at + r * m + k]!;
-        sr += wr * yr - wi * yi;
-        si += wr * yi + wi * yr;
+  let m = 1;
+  for (let level = FACTORS.length - 1; level >= 0; level--) {
+    const p = FACTORS[level]!;
+    const n = m * p;
+    const table = twiddles[level]!;
+    for (let at = 0; at < HALF; at += n) {
+      for (let k = 0; k < m; k++) {
+        for (let q = 0; q < p; q++) {
+          let sr = 0;
+          let si = 0;
+          for (let r = 0; r < p; r++) {
+            const e = 2 * ((k * p + q) * p + r);
+            const wr = table[e]!;
+            const wi = table[e + 1]!;
+            const yr = re[at + r * m + k]!;
+            const yi = im[at + r * m + k]!;
+            sr += wr * yr - wi * yi;
+            si += wr * yi + wi * yr;
+          }
+          scratch[2 * q] = sr;
+          scratch[2 * q + 1] = si;
+        }
+        for (let q = 0; q < p; q++) {
+          re[at + k + q * m] = scratch[2 * q]!;
+          im[at + k + q * m] = scratch[2 * q + 1]!;
+        }
       }
-      scratch[2 * q] = sr;
-      scratch[2 * q + 1] = si;
     }
-    for (let q = 0; q < p; q++) {
-      dstRe[at + k + q * m] = scratch[2 * q]!;
-      dstIm[at + k + q * m] = scratch[2 * q + 1]!;
-    }
+    m = n;
   }
 }
 
 /** Power spectrum |X[k]|², k = 0..N_FFT/2, of one real frame of N_FFT
  *  samples. Packs even and odd samples into one complex FFT of HALF points. */
 export function createPowerSpectrum(): (frame: Float64Array, out: Float64Array) => void {
-  const twiddle = { re: new Float64Array(HALF), im: new Float64Array(HALF) };
-  for (let j = 0; j < HALF; j++) {
-    twiddle.re[j] = Math.cos((-2 * Math.PI * j) / HALF);
-    twiddle.im[j] = Math.sin((-2 * Math.PI * j) / HALF);
-  }
-  const zRe = new Float64Array(HALF);
-  const zIm = new Float64Array(HALF);
+  const twiddles = levelTwiddles();
+  // e^(−2πik/N_FFT), which joins the even and odd halves.
+  const joinRe = Float64Array.from({ length: FREQ_BINS }, (_, k) =>
+    Math.cos((-2 * Math.PI * k) / N_FFT),
+  );
+  const joinIm = Float64Array.from({ length: FREQ_BINS }, (_, k) =>
+    Math.sin((-2 * Math.PI * k) / N_FFT),
+  );
+  const order = digitReversal();
   const fRe = new Float64Array(HALF);
   const fIm = new Float64Array(HALF);
   const scratch = new Float64Array(2 * Math.max(...FACTORS));
   return (frame, out) => {
-    for (let n = 0; n < HALF; n++) {
-      zRe[n] = frame[2 * n]!;
-      zIm[n] = frame[2 * n + 1]!;
+    for (let i = 0; i < HALF; i++) {
+      const n = order[i]!;
+      fRe[i] = frame[2 * n]!;
+      fIm[i] = frame[2 * n + 1]!;
     }
-    fft(HALF, 0, zRe, zIm, 0, 1, fRe, fIm, 0, twiddle, scratch);
+    butterflies(fRe, fIm, twiddles, scratch);
     for (let k = 0; k <= HALF; k++) {
       const a = k % HALF;
       const b = (HALF - k) % HALF;
@@ -145,9 +167,8 @@ export function createPowerSpectrum(): (frame: Float64Array, out: Float64Array) 
       const eIm = (fIm[a]! - fIm[b]!) / 2;
       const oRe = (fIm[a]! + fIm[b]!) / 2;
       const oIm = -(fRe[a]! - fRe[b]!) / 2;
-      const angle = (-2 * Math.PI * k) / N_FFT;
-      const wr = Math.cos(angle);
-      const wi = Math.sin(angle);
+      const wr = joinRe[k]!;
+      const wi = joinIm[k]!;
       const xr = eRe + wr * oRe - wi * oIm;
       const xi = eIm + wr * oIm + wi * oRe;
       out[k] = xr * xr + xi * xi;
@@ -159,6 +180,13 @@ export function createPowerSpectrum(): (frame: Float64Array, out: Float64Array) 
  *  allocates only its output. */
 export function createLogMel(): (audio: Float32Array) => Float32Array {
   const filters = melFilters();
+  // Each triangle covers a few FFT bins; the sums skip the zeros around it.
+  const spans = Array.from({ length: MEL_BINS }, (_, m) => {
+    const row = filters.subarray(m * FREQ_BINS, (m + 1) * FREQ_BINS);
+    const from = row.findIndex((w) => w > 0);
+    const to = FREQ_BINS - [...row].reverse().findIndex((w) => w > 0);
+    return { from, to };
+  });
   const window = Float64Array.from(
     { length: N_FFT },
     (_, n) => 0.5 - 0.5 * Math.cos((2 * Math.PI * n) / N_FFT),
@@ -177,8 +205,8 @@ export function createLogMel(): (audio: Float32Array) => Float32Array {
     };
     // Frames past this one see only zeros.
     const voiced = Math.min(MEL_FRAMES, Math.ceil((length + HALF) / HOP));
-    // [MEL_BINS, MEL_FRAMES], the layout the encoder's conv reads transposed.
-    const logMel = new Float64Array(MEL_BINS * MEL_FRAMES).fill(silentLog);
+    // Time-major [MEL_FRAMES, MEL_BINS], the layout the conv stem reads.
+    const logMel = new Float64Array(MEL_FRAMES * MEL_BINS).fill(silentLog);
     let max = silentLog;
     for (let f = 0; f < voiced; f++) {
       const start = f * HOP - HALF;
@@ -187,20 +215,14 @@ export function createLogMel(): (audio: Float32Array) => Float32Array {
       for (let m = 0; m < MEL_BINS; m++) {
         let sum = 0;
         const row = m * FREQ_BINS;
-        for (let k = 0; k < FREQ_BINS; k++) sum += filters[row + k]! * spectrum[k]!;
+        const { from, to } = spans[m]!;
+        for (let k = from; k < to; k++) sum += filters[row + k]! * spectrum[k]!;
         const v = Math.log10(Math.max(sum, MEL_FLOOR));
-        logMel[m * MEL_FRAMES + f] = v;
+        logMel[f * MEL_BINS + m] = v;
         if (v > max) max = v;
       }
     }
-    // Time-major [MEL_FRAMES, MEL_BINS] for the conv stem.
-    const out = new Float32Array(MEL_FRAMES * MEL_BINS);
     const floor = max - DYNAMIC_RANGE;
-    for (let m = 0; m < MEL_BINS; m++) {
-      for (let f = 0; f < MEL_FRAMES; f++) {
-        out[f * MEL_BINS + m] = (Math.max(logMel[m * MEL_FRAMES + f]!, floor) + 4) / 4;
-      }
-    }
-    return out;
+    return Float32Array.from(logMel, (v) => (Math.max(v, floor) + 4) / 4);
   };
 }
