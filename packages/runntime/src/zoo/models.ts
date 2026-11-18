@@ -67,10 +67,18 @@ const MOONSHINE_STREAMING_TINY = precisions('moonshine-streaming', 'tiny', {
   tokenizerPath: tokenizer('moonshine-streaming'),
 } satisfies SpeechToTextModel);
 
-const WHISPER_SMALL = precisions('whisper', 'small', {
-  arch: 'whisper',
-  tokenizerPath: tokenizer('whisper'),
-} satisfies SpeechToTextModel);
+/** Whisper is hosted on its own repo, with int8 and f16 files. */
+const WHISPER_HUB = 'https://huggingface.co/chmjkb/runntime-whisper/resolve/main';
+const whisperSmall = (precision: string) => ({
+  arch: 'whisper' as const,
+  modelPath: `${WHISPER_HUB}/small/${precision}/model.safetensors`,
+  tokenizerPath: `${WHISPER_HUB}/tokenizer.json`,
+});
+const WHISPER_SMALL = {
+  DEFAULT: whisperSmall('int8'),
+  INT8: whisperSmall('int8'),
+  F16: { ...whisperSmall('f16'), dtype: 'f16' as const },
+} satisfies Record<string, SpeechToTextModel>;
 
 const PRIVACY_FILTER_INT8 = {
   modelPath: weights('privacy-filter', 'base', 'int8g640'),
@@ -137,7 +145,8 @@ export const models = {
     /** OpenAI's Whisper: English, German, French, Spanish, Italian, Polish
      *  and Portuguese. */
     WHISPER: {
-      /** 244M parameters, 484 MB in f16. */
+      /** 244M parameters. DEFAULT is the int8 file, 298 MB; F16 is 484 MB
+       *  and matches the upstream model's transcripts exactly. */
       SMALL: WHISPER_SMALL,
     },
   },

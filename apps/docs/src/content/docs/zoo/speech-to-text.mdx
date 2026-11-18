@@ -11,7 +11,7 @@ notes, live captions, voice commands and searching through recordings.
 `createSpeechToText` runs
 [Moonshine](https://huggingface.co/software-mansion/runntime-moonshine), in
 the classic or the streaming family, for English, and
-[Whisper](https://huggingface.co/software-mansion/runntime-whisper) small for
+[Whisper](https://huggingface.co/chmjkb/runntime-whisper) small for
 English, German, French, Spanish, Italian, Polish and Portuguese.
 
 ## Quick start
@@ -230,7 +230,9 @@ await createSpeechToText({
 Every field is optional. A missing one comes from the family's default
 entry: `TINY.DEFAULT` for Moonshine, `SMALL.DEFAULT` for Whisper.
 
-Whisper in f32 binds a 159 MB embedding, past the 128 MiB storage binding
+Whisper's `DEFAULT` is the int8 file, 298 MB, and `F16` the f16 one, 484
+MB. Both run in f16 and need `shader-f16`. For f32, load OpenAI's own
+`model.safetensors` from `openai/whisper-small` with `dtype: 'f32'`. f32 binds a 159 MB embedding, past the 128 MiB storage binding
 limit a device gets by default. To run it, request a higher
 `maxStorageBufferBindingSize` in `tgpu.init`, or keep the f16 default.
 
@@ -277,9 +279,9 @@ const stt = await createSpeechToText(models.speechToText.MOONSHINE.TINY.DEFAULT,
 
 ## Supported models
 
-| Model                                                                                            | Config                                         | Language                   | Parameters | Weights                |
-| ------------------------------------------------------------------------------------------------ | ---------------------------------------------- | -------------------------- | ---------- | ---------------------- |
-| [moonshine-tiny](https://huggingface.co/software-mansion/runntime-moonshine)                     | `models.speechToText.MOONSHINE.TINY`           | English                    | 27M        | f16 54 MB, f32 108 MB  |
-| [moonshine-base](https://huggingface.co/software-mansion/runntime-moonshine)                     | `models.speechToText.MOONSHINE.BASE`           | English                    | 61M        | f16 123 MB, f32 246 MB |
-| [moonshine-streaming-tiny](https://huggingface.co/software-mansion/runntime-moonshine-streaming) | `models.speechToText.MOONSHINE_STREAMING.TINY` | English                    | 34M        | f16 88 MB, f32 176 MB  |
-| [whisper-small](https://huggingface.co/software-mansion/runntime-whisper)                        | `models.speechToText.WHISPER.SMALL`            | en, de, fr, es, it, pl, pt | 244M       | f16 484 MB, f32 967 MB |
+| Model                                                                                            | Config                                         | Language                   | Parameters | Weights                 |
+| ------------------------------------------------------------------------------------------------ | ---------------------------------------------- | -------------------------- | ---------- | ----------------------- |
+| [moonshine-tiny](https://huggingface.co/software-mansion/runntime-moonshine)                     | `models.speechToText.MOONSHINE.TINY`           | English                    | 27M        | f16 54 MB, f32 108 MB   |
+| [moonshine-base](https://huggingface.co/software-mansion/runntime-moonshine)                     | `models.speechToText.MOONSHINE.BASE`           | English                    | 61M        | f16 123 MB, f32 246 MB  |
+| [moonshine-streaming-tiny](https://huggingface.co/software-mansion/runntime-moonshine-streaming) | `models.speechToText.MOONSHINE_STREAMING.TINY` | English                    | 34M        | f16 88 MB, f32 176 MB   |
+| [whisper-small](https://huggingface.co/chmjkb/runntime-whisper)                                  | `models.speechToText.WHISPER.SMALL`            | en, de, fr, es, it, pl, pt | 244M       | int8 298 MB, f16 484 MB |
