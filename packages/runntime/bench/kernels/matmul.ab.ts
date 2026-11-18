@@ -95,21 +95,29 @@ function gather(name: string, t: number, e: number, k: number, n: number): AbCas
   };
 }
 
-function argmaxDot(name: string, v: number, n: number, dtype: Float = 'f32'): AbCase {
+/** With `bias`, a zero f32 bias [v], so the result matches a version
+ *  without the bias input. */
+function argmaxDot(name: string, v: number, n: number, dtype: Float = 'f32', bias = false): AbCase {
   return {
     name,
     needs: dtype === 'f16' ? ['shader-f16'] : [],
     build: (version) => {
       const w = randMat(version, v, n, dtype);
       const x = randMat(version, 1, n, dtype);
-      return () => version.lib.argmaxDot(w, x);
+      const b = bias ? version.upload(new Float32Array(v), mat(v, 1)) : undefined;
+      return () => version.lib.argmaxDot(w, x, b);
     },
   };
 }
 
 abSuite('matmul', [
-  // gemvVec4: m = 1, no activation, n a multiple of 4.
+  // gemvVec4: m = 1, n a multiple of 4.
   mm('gemvVec4, Moonshine-tiny decode [1,288]×[288,864]', 1, 288, 864),
+  mm('gemvVec4 f16 + bias + gelu, Whisper fc1 [1,768]×[768,3072]', 1, 768, 3072, {
+    dtype: 'f16',
+    bias: true,
+    act: 'gelu',
+  }),
   mm('gemvVec4 f16 + bias, MobileNetV4 classifier [1,1280]×[1280,1000]', 1, 1280, 1000, {
     dtype: 'f16',
     bias: true,
@@ -174,7 +182,9 @@ abSuite('matmul', [
 
   // plain: everything else.
   mm('plain, m = 2 [2,384]×[384,384]', 2, 384, 384),
-  mm('plain, m = 1 with tanh [1,288]×[288,288]', 1, 288, 288, { act: 'tanh' }),
+  mm('plain, m = 1 with tanh, N not a multiple of 4 [1,288]×[288,287]', 1, 288, 287, {
+    act: 'tanh',
+  }),
   mm('plain f16, YOLO26n PSA scores, K=32 [400,32]×[32,400]', 400, 32, 400, { dtype: 'f16' }),
   mm('plain f16, N not a multiple of 4 [64,640]×[640,33]', 64, 640, 33, { dtype: 'f16' }),
   mm('plain f16 + relu, m = 6 [6,128]×[128,128]', 6, 128, 128, { dtype: 'f16', act: 'relu' }),
@@ -268,4 +278,6 @@ abSuite('matmul', [
   // argmaxDot: greedy next token.
   argmaxDot('argmaxDot, Moonshine-tiny vocab [32768,288]', 32768, 288),
   argmaxDot('argmaxDot f16, streaming-medium [32768,640]', 32768, 640, 'f16'),
+  // hasBias: a version without it ignores the zero bias.
+  argmaxDot('argmaxDot f16 + bias, Whisper vocab [51865,768]', 51865, 768, 'f16', true),
 ]);
