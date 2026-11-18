@@ -320,8 +320,11 @@ function checkExpertWeight(
  *
  *  x must be one row; teacher-forced paths use matmul. The result is always
  *  f32, since f16 is only exact to 2048 and would decode the wrong token on a
- *  larger vocabulary. */
-export function argmaxDot(w: Value, x: Value): Value {
+ *  larger vocabulary.
+ *
+ *  `bias`, f32 [V], adds to each row's dot before the argmax: an entry of
+ *  -Infinity or -1e30 keeps that row from winning. */
+export function argmaxDot(w: Value, x: Value, bias?: Value): Value {
   const [, n, wDtype] = want2d('argmaxDot.w', w, FLOAT_DTYPES);
   const [xr, xn, xDtype] = want2d('argmaxDot.x', x, FLOAT_DTYPES);
   if (xr !== 1) throw new Error(`argmaxDot: x must be a single row, got ${xr}`);
@@ -329,5 +332,15 @@ export function argmaxDot(w: Value, x: Value): Value {
   if (wDtype !== xDtype) {
     throw new Error(`argmaxDot: w dtype ${wDtype} must match x's ${xDtype}`);
   }
-  return pending({ elems: 1, dtype: 'f32', dims: [1, 1] }, 'argmaxDot', [w, x]);
+  const rows = w.shape.dims![0]!;
+  if (bias && (bias.shape.dtype !== 'f32' || bias.shape.elems !== rows)) {
+    throw new Error(
+      `argmaxDot: bias must be f32 [${rows}], got ${bias.shape.dtype} [${bias.shape.elems}]`,
+    );
+  }
+  return pending(
+    { elems: 1, dtype: 'f32', dims: [1, 1] },
+    'argmaxDot',
+    bias ? [w, x, bias] : [w, x],
+  );
 }

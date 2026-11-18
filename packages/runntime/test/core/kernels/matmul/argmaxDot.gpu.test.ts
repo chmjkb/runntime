@@ -79,6 +79,45 @@ describe('argmaxDot kernel', () => {
     expect(Array.from(got)).toEqual([Math.min(...tied)]);
   });
 
+  // hasBias: a bias input adds to each row's dot before the argmax. Row
+  // `second` is planted at half the winner's dot, so suppressing the winner
+  // hands it the pick by a margin no rounding closes.
+  it.for(
+    (['f32', 'f16'] as const).flatMap((dtype) =>
+      [
+        { name: 'suppressing the winner', rows: 50257, at: 31337, by: -1e30, want: 'second' },
+        { name: 'suppressing row 0', rows: 300, winner: 0, at: 0, by: -Infinity, want: 'second' },
+        { name: 'lifting a row', rows: 50257, at: 12, by: 1e6, want: 12 },
+        { name: 'a zero bias', rows: 300, at: 31, by: 0, want: 'winner' },
+      ].map((c) => ({ dtype, winner: 31337 % c.rows, second: 7, ...c })),
+    ),
+  )('$dtype bias, $name', async (c, ctx) => {
+    if (c.dtype === 'f16') requireFeature(ctx, root, 'shader-f16');
+    const cols = 64;
+    const { w, x } = planted(c.rows, cols, c.winner, c.dtype);
+    for (let j = 0; j < cols; j++) w[c.second * cols + j] = Math.sign(x[j]!) / 2;
+    const bias = new Float32Array(c.rows);
+    bias[c.at] = c.by;
+    const meta = (r: number) => ({ ...matrix(r, cols), dtype: c.dtype });
+    const got = await toArray(
+      argmaxDot(
+        upload(root, w, meta(c.rows)),
+        upload(root, x, meta(1)),
+        upload(root, bias, [c.rows, 1]),
+      ),
+      ex,
+    );
+    const want = c.want === 'second' ? c.second : c.want === 'winner' ? c.winner : c.want;
+    expect(Array.from(got)).toEqual([want]);
+  });
+
+  it('refuses a bias of another length', () => {
+    const w = upload(root, new Float32Array(12), [3, 4]);
+    const x = upload(root, new Float32Array(4), [1, 4]);
+    const bias = upload(root, new Float32Array(4), [4, 1]);
+    expect(() => argmaxDot(w, x, bias)).toThrow(/bias must be f32 \[3\], got f32 \[4\]/);
+  });
+
   // The partials scratch is shared, so two calls in one submit must each
   // reduce their own.
   it('two calls in one submit', async () => {

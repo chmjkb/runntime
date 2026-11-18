@@ -321,9 +321,14 @@ export const argmaxDotSpec = defineSpec({
   cfg: (node) => ({
     cols: node.pending!.inputs[0]!.shape.dims![1]!,
     inF16: node.pending!.inputs[1]!.shape.dtype === 'f16',
+    hasBias: node.pending!.inputs.length > 2 ? 1 : 0,
   }),
   pipeline: (root, _dtype, cfg) => ({
-    partial: createArgmaxDotPipeline(root, { cols: cfg.cols }, elemFor(cfg.inF16 ? 'f16' : 'f32')),
+    partial: createArgmaxDotPipeline(
+      root,
+      { cols: cfg.cols, hasBias: cfg.hasBias },
+      elemFor(cfg.inF16 ? 'f16' : 'f32'),
+    ),
     reduce: createArgmaxDotReducePipeline(root),
   }),
   encode: ({ node, pipeline, inputs, out, ctx }) => {
@@ -334,7 +339,12 @@ export const argmaxDotSpec = defineSpec({
         ctx.root,
         pipeline.partial,
         w.dims![0]!,
-        { w: narrowFloat(inputs[0]!, w.dtype), x: narrowFloat(inputs[1]!, w.dtype), partials },
+        {
+          w: narrowFloat(inputs[0]!, w.dtype),
+          x: narrowFloat(inputs[1]!, w.dtype),
+          bias: inputs[2] && narrow(inputs[2], 'f32'),
+          partials,
+        },
         elemFor(w.dtype),
       ),
       argmaxDotReduceHandle(ctx.root, pipeline.reduce, { partials, out: narrow(out, 'f32') }),

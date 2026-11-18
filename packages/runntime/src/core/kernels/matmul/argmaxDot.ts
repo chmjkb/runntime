@@ -6,6 +6,8 @@ import { type Elem, F32_ELEM } from '../elem.ts';
 
 /** Fused gemv and argmax for greedy decoding, taking the lowest index on ties.
  *  The logits vector never materializes, so the per-token readback is 4 bytes.
+ *  An optional f32 bias adds to each row's dot first, so a large negative
+ *  entry suppresses a token.
  *
  *  Two dispatches in the same pass, where in-pass ordering makes the partials
  *  visible to the reducer. The product is bandwidth-bound, so the layout chases
@@ -20,8 +22,11 @@ const NEG_SEED = -3.4e38; // ~ -FLT_MAX; every real dot beats it
 
 const Dims = d.struct({ rows: d.u32 });
 
-const Config = d.struct({ cols: d.u32 });
-const config = tgpu.accessor(Config, { cols: 1 });
+const Config = d.struct({
+  cols: d.u32,
+  hasBias: d.u32, // comptime 0|1 — each dot adds bias[row]
+});
+const config = tgpu.accessor(Config, { cols: 1, hasBias: 0 });
 
 const laneDots = tgpu.workgroupVar(d.arrayOf(d.f32, WG));
 const bestVal = tgpu.workgroupVar(d.arrayOf(d.f32, RL));
@@ -31,6 +36,7 @@ function makeArgmaxDotVariant(elem: Elem) {
   const layout = tgpu.bindGroupLayout({
     w: { storage: d.arrayOf(elem.scalar), access: 'readonly' }, // [rows, cols]
     x: { storage: d.arrayOf(elem.scalar), access: 'readonly' }, // [1, cols]
+    bias: { storage: d.arrayOf(d.f32), access: 'readonly' }, // [rows]; dead when hasBias=0
     partials: { storage: d.arrayOf(d.f32), access: 'mutable' }, // [SPLIT, 2] (val, idx)
     dims: { uniform: Dims },
   });
@@ -68,6 +74,9 @@ function makeArgmaxDotVariant(elem: Elem) {
         let dot = d.f32(0);
         for (const l of tgpu.unroll(std.range(KL))) {
           dot += laneDots.$[rl * KL + l]!;
+        }
+        if (config.$.hasBias > 0) {
+          dot += layout.$.bias[row]!;
         }
         if (dot > v) {
           v = dot;
@@ -147,10 +156,12 @@ export const argmaxDotReduceKernel = tgpu.computeFn({
 
 export function createArgmaxDotPipeline(
   root: TgpuRoot,
-  cfg: { cols: number },
+  cfg: { cols: number; hasBias?: number },
   elem: Elem = F32_ELEM,
 ) {
-  return root.with(config, cfg).createComputePipeline({ compute: argmaxDotVariant(elem).kernel });
+  return root
+    .with(config, { cols: cfg.cols, hasBias: cfg.hasBias ?? 0 })
+    .createComputePipeline({ compute: argmaxDotVariant(elem).kernel });
 }
 
 export function createArgmaxDotReducePipeline(root: TgpuRoot) {
@@ -161,11 +172,15 @@ export function argmaxDotPartialHandle(
   root: TgpuRoot,
   pipeline: ReturnType<typeof createArgmaxDotPipeline>,
   rows: number,
-  buffers: { w: FloatBuffer; x: FloatBuffer; partials: F32Buffer },
+  buffers: { w: FloatBuffer; x: FloatBuffer; bias?: F32Buffer; partials: F32Buffer },
   elem: Elem = F32_ELEM,
 ): KernelHandle {
   const dims = cachedUniform(root, Dims, { rows });
-  const bindGroup = cachedBindGroup(root, argmaxDotVariant(elem).layout, { ...buffers, dims });
+  const bindGroup = cachedBindGroup(root, argmaxDotVariant(elem).layout, {
+    ...buffers,
+    bias: buffers.bias ?? buffers.x,
+    dims,
+  });
   return makeHandle(pipeline, 'argmaxDot', bindGroup, ARGMAX_SPLIT);
 }
 
