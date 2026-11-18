@@ -46,6 +46,8 @@ export {
 
 export {
   createSpeechToText,
+  type SpeechLanguage,
+  type SpeechOptions,
   type SpeechStreamUpdate,
   type SpeechToText,
   type SpeechToTextArch,

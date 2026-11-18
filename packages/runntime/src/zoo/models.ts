@@ -67,6 +67,11 @@ const MOONSHINE_STREAMING_TINY = precisions('moonshine-streaming', 'tiny', {
   tokenizerPath: tokenizer('moonshine-streaming'),
 } satisfies SpeechToTextModel);
 
+const WHISPER_SMALL = precisions('whisper', 'small', {
+  arch: 'whisper',
+  tokenizerPath: tokenizer('whisper'),
+} satisfies SpeechToTextModel);
+
 const PRIVACY_FILTER_INT8 = {
   modelPath: weights('privacy-filter', 'base', 'int8g640'),
 } satisfies PrivacyFilterModel;
@@ -128,6 +133,12 @@ export const models = {
     MOONSHINE_STREAMING: {
       /** 34M parameters. */
       TINY: MOONSHINE_STREAMING_TINY,
+    },
+    /** OpenAI's Whisper: English, German, French, Spanish, Italian, Polish
+     *  and Portuguese. */
+    WHISPER: {
+      /** 244M parameters, 484 MB in f16. */
+      SMALL: WHISPER_SMALL,
     },
   },
   objectDetection: {

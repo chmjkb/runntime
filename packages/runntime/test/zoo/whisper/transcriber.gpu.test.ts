@@ -6,6 +6,7 @@ import tgpu from 'typegpu';
 import { describe, expect, it } from 'vitest';
 import { initRunntime } from '../../../src/core/index.ts';
 import { fetchJson, openWeights } from '../../../src/zoo/load.ts';
+import { createSpeechToText } from '../../../src/zoo/tasks/audio/speechToText.ts';
 import { createWhisperTokenizer } from '../../../src/zoo/whisper/tokenizer.ts';
 import { createWhisperTranscriber } from '../../../src/zoo/whisper/transcriber.ts';
 import { END_OF_TEXT, type WhisperLanguage } from '../../../src/zoo/whisper/config.ts';
@@ -67,4 +68,26 @@ describe.skipIf(!present)('whisper small', () => {
       }
     },
   );
+});
+
+describe.skipIf(!present)('createSpeechToText with whisper', () => {
+  it('transcribes each language through the task runner', { timeout: 120_000 }, async () => {
+    const runner = await createSpeechToText({
+      arch: 'whisper',
+      modelPath: `${DIR}/model.safetensors`,
+      tokenizerPath: `${DIR}/tokenizer.json`,
+    });
+    try {
+      for (const language of new Set(refs.map((r) => r.language))) {
+        const ref = refs.find((r) => r.language === language)!;
+        expect(await runner.transcribe(await audioOf(ref.id), { language })).toBe(ref.text);
+      }
+      await expect(
+        // @ts-expect-error: not a language the runner takes.
+        runner.transcribe(new Float32Array(16000), { language: 'xx' }),
+      ).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
+    } finally {
+      runner.dispose();
+    }
+  });
 });

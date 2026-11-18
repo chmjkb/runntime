@@ -1,5 +1,6 @@
 /** Speech to text task: 16 kHz mono audio in, as a clip or live from the
- *  microphone, text out. Runs Moonshine on the initRunntime() device. */
+ *  microphone, text out. Runs Moonshine (English) or Whisper (7 languages)
+ *  on the initRunntime() device. */
 
 import {
   createResourceScope,
@@ -21,6 +22,9 @@ import { analyzeSegment } from '../../moonshine/segmenter.ts';
 import { createMoonshineTokenizer } from '../../moonshine/tokenizer.ts';
 import { createTranscriber } from '../../moonshine/transcriber.ts';
 import { createTranscriber as createStreamingTranscriber } from '../../moonshine-streaming/transcriber.ts';
+import { END_OF_TEXT, LANGUAGE_TOKENS, type WhisperLanguage } from '../../whisper/config.ts';
+import { createWhisperTokenizer } from '../../whisper/tokenizer.ts';
+import { createWhisperTranscriber } from '../../whisper/transcriber.ts';
 import { SPEECH_SAMPLE_RATE } from './audioInput.ts';
 
 /** New audio between two transcriptions of the sentence being spoken. */
@@ -31,8 +35,19 @@ const MAX_SEGMENT_SECONDS = 15;
  *  often ends mid-word, so the default cuts good text before its EOS. */
 const PREVIEW_TOKENS_PER_SECOND = 10;
 
-/** The two Moonshine families. Each has its own weights and decoder. */
-export type SpeechToTextArch = 'moonshine' | 'moonshine-streaming';
+/** The model families. Each has its own weights and decoder. The two
+ *  Moonshine families are English only. */
+export type SpeechToTextArch = 'moonshine' | 'moonshine-streaming' | 'whisper';
+
+/** Languages the runner transcribes, as ISO 639-1 codes. Every one runs on
+ *  Whisper, only `en` on Moonshine. */
+export type SpeechLanguage = WhisperLanguage;
+
+/** Options of one transcription or stream. */
+export interface SpeechOptions {
+  /** The language spoken. Default `en`. */
+  readonly language?: SpeechLanguage;
+}
 
 /** What to load. Every field is optional; a missing one comes from the
  *  family's default entry in models.speechToText. */
@@ -60,12 +75,13 @@ export interface SpeechStreamUpdate {
 
 export interface SpeechToText {
   /** Mono samples at 16 kHz in, the spoken text out. Long clips are split
-   *  on quiet moments. Clips shorter than one model frame give ''. */
-  transcribe(audio: Float32Array): Promise<string>;
+   *  on quiet moments. Clips shorter than one model frame give ''. Throws
+   *  INVALID_ARGUMENT for a language the model does not speak. */
+  transcribe(audio: Float32Array, options?: SpeechOptions): Promise<string>;
   /** Starts live transcription: feed samples with streamInsert, read the
    *  updates here. An update comes when the text changes; the iterator
    *  ends after streamStop or dispose. One stream at a time. */
-  stream(): AsyncIterable<SpeechStreamUpdate>;
+  stream(options?: SpeechOptions): AsyncIterable<SpeechStreamUpdate>;
   /** Adds microphone samples, mono at 16 kHz, to the open stream. */
   streamInsert(samples: Float32Array): void;
   /** Commits what is left in the open stream and ends its iterator. */
@@ -76,6 +92,7 @@ export interface SpeechToText {
 
 /** The audio of one live stream. */
 interface Session {
+  language: SpeechLanguage;
   /** The sentence being spoken, as inserted chunks. */
   chunks: Float32Array[];
   /** Samples in chunks. */
@@ -85,6 +102,50 @@ interface Session {
   stopped: boolean;
   /** Resumes the stream loop, set while it waits for audio. */
   wake: () => void;
+}
+
+/** One loaded model behind the runner: audio and a language in, the ids
+ *  and text out. */
+interface Transcriber {
+  readonly minSamples: number;
+  readonly eosId: number;
+  transcribe(
+    audio: Float32Array,
+    language: SpeechLanguage,
+    tokensPerSecond?: number,
+  ): Promise<{ ids: number[]; text: string }>;
+  dispose(): void;
+}
+
+/** Shortest clip Whisper takes, 10 ms. Its window pads anything shorter. */
+const WHISPER_MIN_SAMPLES = 160;
+
+/** Loads the weights and the tokenizer of `arch`. */
+async function loadTranscriber(
+  arch: SpeechToTextArch,
+  sd: Awaited<ReturnType<typeof openWeights>>,
+  tokenizerJson: unknown,
+  opts: { weightDtype: 'f32' | 'f16'; onProgress: LoadOptions['onProgress'] },
+): Promise<Transcriber> {
+  if (arch === 'whisper') {
+    const whisper = await createWhisperTranscriber(sd, createWhisperTokenizer(tokenizerJson), opts);
+    return {
+      minSamples: WHISPER_MIN_SAMPLES,
+      eosId: END_OF_TEXT,
+      transcribe: (audio, language, tokensPerSecond) =>
+        whisper.transcribe(audio, language, tokensPerSecond),
+      dispose: () => whisper.dispose(),
+    };
+  }
+  const tokenizer = createMoonshineTokenizer(tokenizerJson);
+  const make = arch === 'moonshine' ? createTranscriber : createStreamingTranscriber;
+  const moonshine = await make(sd, tokenizer, opts);
+  return {
+    minSamples: moonshine.minSamples,
+    eosId: tokenizer.eosId,
+    transcribe: (audio, _language, tokensPerSecond) => moonshine.transcribe(audio, tokensPerSecond),
+    dispose: () => moonshine.dispose(),
+  };
 }
 
 /** Loads the checkpoint and the tokenizer, warms every GPU path once, and
@@ -98,10 +159,11 @@ export async function createSpeechToText(
   try {
     const device = defaultRoot().device;
     const arch = config.arch ?? 'moonshine';
-    const defaults =
-      arch === 'moonshine'
-        ? models.speechToText.MOONSHINE.TINY.DEFAULT
-        : models.speechToText.MOONSHINE_STREAMING.TINY.DEFAULT;
+    const defaults = {
+      moonshine: models.speechToText.MOONSHINE.TINY.DEFAULT,
+      'moonshine-streaming': models.speechToText.MOONSHINE_STREAMING.TINY.DEFAULT,
+      whisper: models.speechToText.WHISPER.SMALL.DEFAULT,
+    }[arch];
     const {
       modelPath = defaults.modelPath,
       tokenizerPath = defaults.tokenizerPath,
@@ -116,14 +178,17 @@ export async function createSpeechToText(
       ...opts,
       cacheId: opts.cacheId ?? cacheId(modelPath),
     });
-    const tokenizer = createMoonshineTokenizer(
-      await fetchJson(tokenizerPath, { ...opts, cacheId: cacheId(tokenizerPath) }),
-    );
+    const tokenizerJson = await fetchJson(tokenizerPath, {
+      ...opts,
+      cacheId: cacheId(tokenizerPath),
+    });
 
     throwIfAborted(opts.signal);
-    const make = arch === 'moonshine' ? createTranscriber : createStreamingTranscriber;
     const transcriber = scope.track(
-      await make(sd, tokenizer, { weightDtype: dtype, onProgress: opts.onProgress }),
+      await loadTranscriber(arch, sd, tokenizerJson, {
+        weightDtype: dtype,
+        onProgress: opts.onProgress,
+      }),
     );
 
     // Compiles the kernels, and turns a GPU error into one load error.
@@ -131,15 +196,15 @@ export async function createSpeechToText(
     if (opts.warmUp !== false) {
       await warmUp(device, async () => {
         const silence = new Float32Array(SPEECH_SAMPLE_RATE);
-        return Float32Array.from((await transcriber.transcribe(silence)).ids);
+        return Float32Array.from((await transcriber.transcribe(silence, 'en')).ids);
       });
     }
 
     let disposed = false;
     // Calls run one after another: the model reuses its caches between clips.
     let queue: Promise<unknown> = Promise.resolve();
-    const enqueue = (audio: Float32Array, tokensPerSecond?: number) => {
-      const run = queue.then(() => transcriber.transcribe(audio, tokensPerSecond));
+    const enqueue = (audio: Float32Array, language: SpeechLanguage, tokensPerSecond?: number) => {
+      const run = queue.then(() => transcriber.transcribe(audio, language, tokensPerSecond));
       queue = run.catch(() => undefined);
       return run.catch(rethrowRunError);
     };
@@ -167,12 +232,16 @@ export async function createSpeechToText(
           const commit = final || segment.shouldFinalize;
           let text = '';
           if (segment.hasSpeech && audio.length >= transcriber.minSamples) {
-            const result = await enqueue(audio, commit ? undefined : PREVIEW_TOKENS_PER_SECOND);
+            const result = await enqueue(
+              audio,
+              session.language,
+              commit ? undefined : PREVIEW_TOKENS_PER_SECOND,
+            );
             text = result.text.trim();
             // On audio cut mid-word the model can loop: it runs into the token
             // cap without EOS, or repeats a phrase. Such a preview is not
             // shown, the previous one stays until the next tick.
-            const looped = result.ids.at(-1) !== tokenizer.eosId || repeatsPhrase(text);
+            const looped = result.ids.at(-1) !== transcriber.eosId || repeatsPhrase(text);
             if (!commit && looped) text = last.nonCommitted;
           } else if (segment.seconds >= MAX_SEGMENT_SECONDS) {
             // Silence is never transcribed, so only its last second stays.
@@ -197,19 +266,21 @@ export async function createSpeechToText(
     }
 
     return {
-      async transcribe(audio) {
+      async transcribe(audio, options = {}) {
         if (disposed) throw new RunntimeError('RESOURCE_DISPOSED', 'speech to text is disposed');
         if (!(audio instanceof Float32Array)) {
           throw new RunntimeError('INVALID_ARGUMENT', 'transcribe: audio must be a Float32Array');
         }
+        const language = languageOf('transcribe', arch, options);
         if (audio.length < transcriber.minSamples) return '';
-        return (await enqueue(audio)).text;
+        return (await enqueue(audio, language)).text;
       },
-      stream() {
+      stream(options = {}) {
         if (disposed) throw new RunntimeError('RESOURCE_DISPOSED', 'speech to text is disposed');
         if (live)
           throw new RunntimeError('INVALID_ARGUMENT', 'stream: a stream is open, stop it first');
-        live = { chunks: [], length: 0, fresh: 0, stopped: false, wake: () => {} };
+        const language = languageOf('stream', arch, options);
+        live = { language, chunks: [], length: 0, fresh: 0, stopped: false, wake: () => {} };
         return liveLoop(live);
       },
       streamInsert(samples) {
@@ -248,6 +319,21 @@ export async function createSpeechToText(
     scope.dispose();
     throw asLoadError(err, opts.signal);
   }
+}
+
+/** The checked language of a call. */
+function languageOf(call: string, arch: SpeechToTextArch, options: SpeechOptions): SpeechLanguage {
+  const { language = 'en' } = options;
+  if (!Object.hasOwn(LANGUAGE_TOKENS, language)) {
+    throw new RunntimeError('INVALID_ARGUMENT', `${call}: unknown language '${language}'`);
+  }
+  if (arch !== 'whisper' && language !== 'en') {
+    throw new RunntimeError(
+      'INVALID_ARGUMENT',
+      `${call}: ${arch} transcribes English only, load arch 'whisper' for '${language}'`,
+    );
+  }
+  return language;
 }
 
 /** Joins the chunks into one array of `length` samples. */
