@@ -10,7 +10,9 @@ notes, live captions, voice commands and searching through recordings.
 
 `createSpeechToText` runs
 [Moonshine](https://huggingface.co/software-mansion/runntime-moonshine), in
-the classic or the streaming family.
+the classic or the streaming family, for English, and
+[Whisper](https://huggingface.co/software-mansion/runntime-whisper) small for
+English, German, French, Spanish, Italian, Polish and Portuguese.
 
 ## Quick start
 
@@ -38,6 +40,26 @@ Record a few words. The clip is captured as mono PCM at 16 kHz and passed
 to `transcribe()`, on your GPU.
 
 <Transcribe client:only="react" />
+
+## Other languages
+
+Load Whisper and pass the language spoken to each call, as an ISO 639-1
+code. One loaded model serves every language, so switching costs nothing.
+
+```ts twoslash
+declare const audio: Float32Array;
+// ---cut---
+import { createSpeechToText, models } from 'runntime/zoo';
+
+const stt = await createSpeechToText(models.speechToText.WHISPER.SMALL.DEFAULT);
+
+const text = await stt.transcribe(audio, { language: 'pl' });
+console.log(text); // "Chociaż ta kępa mchów rosła nad samym strumykiem..."
+```
+
+`language` takes `'en'`, `'de'`, `'fr'`, `'es'`, `'it'`, `'pl'` or `'pt'`,
+default `'en'`. `stream({ language })` takes it too. Moonshine speaks
+English only: any other language throws an `INVALID_ARGUMENT`.
 
 ## Live microphone
 
@@ -95,8 +117,8 @@ function createSpeechToText(
 ): Promise<SpeechToText>;
 
 interface SpeechToText {
-  transcribe(audio: Float32Array): Promise<string>;
-  stream(): AsyncIterable<SpeechStreamUpdate>;
+  transcribe(audio: Float32Array, options?: SpeechOptions): Promise<string>;
+  stream(options?: SpeechOptions): AsyncIterable<SpeechStreamUpdate>;
   streamInsert(samples: Float32Array): void;
   streamStop(): void;
   dispose(): void;
@@ -106,9 +128,14 @@ interface SpeechStreamUpdate {
   readonly committed: string;
   readonly nonCommitted: string;
 }
+
+interface SpeechOptions {
+  readonly language?: 'en' | 'de' | 'fr' | 'es' | 'it' | 'pl' | 'pt';
+}
 ```
 
-- `transcribe(audio)` takes mono samples at 16 kHz and returns the text.
+- `transcribe(audio, { language })` takes mono samples at 16 kHz and
+  returns the text, see [Other languages](#other-languages).
   Long clips are split on quiet moments and transcribed piece by piece. A
   clip shorter than one model frame gives an empty string.
 - `stream()` starts live transcription. Loop over the result with
@@ -161,7 +188,7 @@ point at your own files.
 
 ```ts
 interface SpeechToTextModel {
-  readonly arch?: 'moonshine' | 'moonshine-streaming';
+  readonly arch?: 'moonshine' | 'moonshine-streaming' | 'whisper';
   readonly modelPath?: ModelPath;
   readonly tokenizerPath?: string;
   readonly dtype?: 'f32' | 'f16';
@@ -181,6 +208,9 @@ await createSpeechToText(models.speechToText.MOONSHINE.BASE.DEFAULT);
 // The streaming family.
 await createSpeechToText(models.speechToText.MOONSHINE_STREAMING.TINY.DEFAULT);
 
+// Whisper, for the languages Moonshine does not speak.
+await createSpeechToText(models.speechToText.WHISPER.SMALL.DEFAULT);
+
 // Your own copy of the files.
 await createSpeechToText({
   modelPath: '/models/moonshine/model.safetensors',
@@ -188,8 +218,8 @@ await createSpeechToText({
 });
 ```
 
-- **arch** - `'moonshine'` (default) or `'moonshine-streaming'`. Picks the
-  model family and the default files.
+- **arch** - `'moonshine'` (default), `'moonshine-streaming'` or
+  `'whisper'`. Picks the model family and the default files.
 - **modelPath** - the weights, a `model.safetensors` file. The original
   file from the Hub works as is. The model size is read from the file.
 - **tokenizerPath** - the `tokenizer.json` file next to it.
@@ -197,8 +227,12 @@ await createSpeechToText({
   half the GPU memory, and needs a device with `shader-f16`. Default: `f16`
   where the device has it, `f32` elsewhere. Either loads any weight file.
 
-Every field is optional. A missing one comes from the family's `TINY.DEFAULT`
-entry.
+Every field is optional. A missing one comes from the family's default
+entry: `TINY.DEFAULT` for Moonshine, `SMALL.DEFAULT` for Whisper.
+
+Whisper in f32 binds a 159 MB embedding, past the 128 MiB storage binding
+limit a device gets by default. To run it, request a higher
+`maxStorageBufferBindingSize` in `tgpu.init`, or keep the f16 default.
 
 ## Loading options
 
@@ -243,8 +277,9 @@ const stt = await createSpeechToText(models.speechToText.MOONSHINE.TINY.DEFAULT,
 
 ## Supported models
 
-| Model                                                                                            | Config                                         | Language | Parameters | Weights                |
-| ------------------------------------------------------------------------------------------------ | ---------------------------------------------- | -------- | ---------- | ---------------------- |
-| [moonshine-tiny](https://huggingface.co/software-mansion/runntime-moonshine)                     | `models.speechToText.MOONSHINE.TINY`           | English  | 27M        | f16 54 MB, f32 108 MB  |
-| [moonshine-base](https://huggingface.co/software-mansion/runntime-moonshine)                     | `models.speechToText.MOONSHINE.BASE`           | English  | 61M        | f16 123 MB, f32 246 MB |
-| [moonshine-streaming-tiny](https://huggingface.co/software-mansion/runntime-moonshine-streaming) | `models.speechToText.MOONSHINE_STREAMING.TINY` | English  | 34M        | f16 88 MB, f32 176 MB  |
+| Model                                                                                            | Config                                         | Language                   | Parameters | Weights                |
+| ------------------------------------------------------------------------------------------------ | ---------------------------------------------- | -------------------------- | ---------- | ---------------------- |
+| [moonshine-tiny](https://huggingface.co/software-mansion/runntime-moonshine)                     | `models.speechToText.MOONSHINE.TINY`           | English                    | 27M        | f16 54 MB, f32 108 MB  |
+| [moonshine-base](https://huggingface.co/software-mansion/runntime-moonshine)                     | `models.speechToText.MOONSHINE.BASE`           | English                    | 61M        | f16 123 MB, f32 246 MB |
+| [moonshine-streaming-tiny](https://huggingface.co/software-mansion/runntime-moonshine-streaming) | `models.speechToText.MOONSHINE_STREAMING.TINY` | English                    | 34M        | f16 88 MB, f32 176 MB  |
+| [whisper-small](https://huggingface.co/software-mansion/runntime-whisper)                        | `models.speechToText.WHISPER.SMALL`            | en, de, fr, es, it, pl, pt | 244M       | f16 484 MB, f32 967 MB |
