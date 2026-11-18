@@ -214,6 +214,7 @@ function makeGemvVec4Kernel(cfg: GemvVec4Cfg, elem: Elem) {
       if (hasBias > 0) {
         sum = sum + d.vec4f(layout.$.bias[cg]!);
       }
+      sum = actSlot.$(sum);
       if (hasAdd > 0) {
         sum = sum + d.vec4f(layout.$.addend[cg]!);
       }
@@ -224,10 +225,10 @@ function makeGemvVec4Kernel(cfg: GemvVec4Cfg, elem: Elem) {
 
 export function createMatmulGemvVec4Pipeline(
   root: TgpuRoot,
-  cfg: { k: number; n: number; hasBias?: number; hasAdd?: number },
+  cfg: { k: number; n: number; hasBias?: number; hasAdd?: number; act?: number },
   elem: Elem = F32_ELEM,
 ) {
-  return root.createComputePipeline({
+  return root.with(actSlot, activationFor(cfg.act)).createComputePipeline({
     compute: makeGemvVec4Kernel(
       { k: cfg.k, n: cfg.n, hasBias: cfg.hasBias ?? 0, hasAdd: cfg.hasAdd ?? 0 },
       elem,

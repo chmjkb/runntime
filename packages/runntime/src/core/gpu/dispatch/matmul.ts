@@ -82,8 +82,11 @@ export const matmulSpec = defineSpec({
       const tiledOk = m >= MATMUL_TILED_MIN_M && matmulTiledVec4Eligible(k, n);
       if (smallMEligible(m, n, ctx.subgroupsOk) && !(tiledOk && n >= TILED_MIN_N_FEW_ROWS)) {
         route = 'smallm';
+      } else if (m === 1 && matmulGemvVec4Eligible(n)) {
+        // Only the vec4 single-row kernel folds an activation.
+        route = 'gemvVec4';
       } else if (m === 1 && attrs.act === 0) {
-        route = matmulGemvVec4Eligible(n) ? 'gemvVec4' : 'gemv';
+        route = 'gemv';
       } else if (tiledOk) route = 'tiledVec4';
       else if (!f16 && m >= MATMUL_TILED_MIN_M) route = 'tiled';
     }

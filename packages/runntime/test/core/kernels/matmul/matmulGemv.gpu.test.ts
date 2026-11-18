@@ -6,8 +6,7 @@ import { checkMatmul, EPILOGUES } from './checkMatmul.ts';
 const { root } = await gpu();
 
 describe('matmulGemv kernels', () => {
-  // m = 1 with no activation (smallm needs m >= 4). gemvVec4 takes n % 4 == 0,
-  // gemv the rest.
+  // m = 1 (smallm needs m >= 4). gemvVec4 takes n % 4 == 0, gemv the rest.
   it.each([
     // gemv: n % 4 != 0
     { name: '1×1 (gemv)', k: 1, n: 1 },
@@ -30,18 +29,19 @@ describe('matmulGemv kernels', () => {
     await checkMatmul(1, k, n, 'f16');
   });
 
-  // m = 1. An activation sends m = 1 to plain, so only bias and addend run
-  // here; matmul.gpu.test.ts covers the activations. gemv: n = 67, gemvVec4:
-  // n = 68.
+  // m = 1. gemvVec4 (n % 4 == 0) folds every epilogue, activations
+  // included. gemv (n = 67) takes bias and addend; an activation sends it to
+  // plain, which matmul.gpu.test.ts covers.
   it.for(
-    (['f32', 'f16'] as const).flatMap((dtype) =>
-      [
-        { route: 'gemv', n: 67 },
-        { route: 'gemvVec4', n: 68 },
-      ].flatMap((shape) =>
-        EPILOGUES.filter((e) => !e.epilogue.activation).map((e) => ({ dtype, ...shape, ...e })),
-      ),
-    ),
+    (['f32', 'f16'] as const).flatMap((dtype) => [
+      ...EPILOGUES.filter((e) => !e.epilogue.activation).map((e) => ({
+        dtype,
+        route: 'gemv',
+        n: 67,
+        ...e,
+      })),
+      ...EPILOGUES.map((e) => ({ dtype, route: 'gemvVec4', n: 68, ...e })),
+    ]),
   )('$route $dtype with $name: [1, 33] × [33, $n]', async (c, ctx) => {
     if (c.dtype === 'f16') requireFeature(ctx, root, 'shader-f16');
     await checkMatmul(1, 33, c.n, c.dtype, c.epilogue);
