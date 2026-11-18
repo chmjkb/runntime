@@ -1,0 +1,70 @@
+/** Whisper small against Hugging Face transformers' greedy f32 output on
+ *  the same clips, one to three per language. The weights and references
+ *  are local files under `.weights/whisper-small/`, written by
+ *  `dump_whisper_ref.py`; without them the suite skips. */
+import tgpu from 'typegpu';
+import { describe, expect, it } from 'vitest';
+import { initRunntime } from '../../../src/core/index.ts';
+import { fetchJson, openWeights } from '../../../src/zoo/load.ts';
+import { createWhisperTokenizer } from '../../../src/zoo/whisper/tokenizer.ts';
+import { createWhisperTranscriber } from '../../../src/zoo/whisper/transcriber.ts';
+import { END_OF_TEXT, type WhisperLanguage } from '../../../src/zoo/whisper/config.ts';
+
+const DIR = '/.weights/whisper-small';
+
+interface Reference {
+  id: string;
+  language: WhisperLanguage;
+  seconds: number;
+  ids: number[];
+  text: string;
+}
+
+const present = (await fetch(`${DIR}/ref/manifest.json`)).ok;
+const refs: Reference[] = present ? await (await fetch(`${DIR}/ref/manifest.json`)).json() : [];
+const audioOf = async (id: string) =>
+  new Float32Array(await (await fetch(`${DIR}/ref/${id}.f32`)).arrayBuffer());
+
+// The f32 token embedding is 159 MB, past the default 128 MiB binding limit.
+const adapter = (await navigator.gpu.requestAdapter())!;
+initRunntime(
+  await tgpu.init({
+    device: {
+      optionalFeatures: ['subgroups', 'shader-f16'],
+      requiredLimits: {
+        maxStorageBufferBindingSize: adapter.limits.maxStorageBufferBindingSize,
+        maxBufferSize: adapter.limits.maxBufferSize,
+      },
+    },
+  }),
+);
+
+describe.skipIf(!present)('whisper small', () => {
+  it.for(['f32', 'f16'] as const)(
+    'matches transformers on every clip, %s',
+    { timeout: 120_000 },
+    async (dtype) => {
+      const tokenizer = createWhisperTokenizer(await fetchJson(`${DIR}/tokenizer.json`));
+      const sd = await openWeights(`${DIR}/model.safetensors`);
+      const transcriber = await createWhisperTranscriber(sd, tokenizer, { weightDtype: dtype });
+      try {
+        let exact = 0;
+        for (const ref of refs) {
+          const got = await transcriber.transcribe(await audioOf(ref.id), ref.language);
+          // transformers returns the ids without the EOS.
+          const same = got.ids.filter((id) => id !== END_OF_TEXT).join() === ref.ids.join();
+          if (same) exact++;
+          console.log(
+            `${dtype} ${ref.id} ${same ? 'exact' : 'DIFF'} mel ${got.timings.melMs.toFixed(0)} ms, ` +
+              `encode ${got.timings.encodeMs.toFixed(0)} ms, decode ${got.timings.decodeMs.toFixed(0)} ms ` +
+              `/ ${got.timings.steps} steps\n  ours: ${got.text}\n  hf:   ${ref.text}`,
+          );
+        }
+        // f16 rounding may flip a near-tie token; f32 matches every clip.
+        expect(exact).toBeGreaterThanOrEqual(dtype === 'f32' ? refs.length : refs.length - 3);
+      } finally {
+        transcriber.dispose();
+      }
+    },
+  );
+});
